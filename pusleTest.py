@@ -4,7 +4,7 @@ from qiskit_dynamics.backend import default_experiment_result_function
 from qiskit_dynamics.array import Array
 import jax
 from qiskit import QuantumCircuit, pulse, transpile, schedule
-from qiskit_ibm_runtime.fake_provider import FakeManila
+from qiskit_ibm_runtime.fake_provider.backends.manila.fake_manila import FakeManila
 
 gate_backend = FakeManila()
 gate_backend.configuration().hamiltonian['qub']={'0': 2,'1': 2,'2': 2,'3': 2,'4': 2}
@@ -24,7 +24,10 @@ qc_test.measure_all()
 t_qc = transpile(qc_test, backend=gate_backend)
 pulse_test = schedule(t_qc, backend=gate_backend)
 
-
 pulse_test.draw()
 
 plt.show()
+
+results = pulse_backend.run(pulse_test).result()
+counts = results.get_counts()
+print(counts)
