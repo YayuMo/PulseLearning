@@ -1,33 +1,22 @@
-from matplotlib import pyplot as plt
-from qiskit_dynamics import Solver, DynamicsBackend
-from qiskit_dynamics.backend import default_experiment_result_function
-from qiskit_dynamics.array import Array
-import jax
-from qiskit import QuantumCircuit, pulse, transpile, schedule
-from qiskit_ibm_runtime.fake_provider.backends.manila.fake_manila import FakeManila
+from qiskit.quantum_info import Operator
+from qiskit_dynamics import DynamicsBackend, Solver
+import numpy as np
 
-gate_backend = FakeManila()
-gate_backend.configuration().hamiltonian['qub']={'0': 2,'1': 2,'2': 2,'3': 2,'4': 2}
-jax.config.update('jax_enable_x64', True)
-jax.config.update('jax_platform_name', 'cpu')
-Array.set_default_backend('jax')
-pulse_backend = DynamicsBackend.from_backend(gate_backend)
-solver_options = {'method': 'jax_odeint', 'atol': 1e-6, 'rtol': 1e-8}
-pulse_backend.set_options(solver_options=solver_options)
-pulse_backend.configuration = lambda : gate_backend.configuration()
+nu_z = 10.
+nu_x = 1.
+nu_d = 9.98 # Almost on resonance with the Hamiltonian's energy levels difference, nu_z
 
-qc_test = QuantumCircuit(2)
-qc_test.h(0)
-qc_test.cx(0, 1)
-qc_test.measure_all()
+X = Operator.from_label('X')
+Y = Operator.from_label('Y')
+Z = Operator.from_label('Z')
+s_p = 0.5 * (X + 1j * Y)
 
-t_qc = transpile(qc_test, backend=gate_backend)
-pulse_test = schedule(t_qc, backend=gate_backend)
+solver = Solver(
+    static_hamiltonian=.5 * 2 * np.pi * nu_z * Z,
+    hamiltonian_operators=[2 * np.pi * nu_x * X],
+    hamiltonian_channels=["d0"],
+    channel_carrier_freqs={"d0": nu_x},
+    dt=0.01,
+)
 
-pulse_test.draw()
-
-plt.show()
-
-results = pulse_backend.run(pulse_test).result()
-counts = results.get_counts()
-print(counts)
+dynamics_backend = DynamicsBackend(solver=solver, subsystem_dims=[2])
