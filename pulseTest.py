@@ -8,64 +8,61 @@ import matplotlib.pyplot as plt
 jax.config.update("jax_enable_x64", True)
 jax.config.update("jax_platform_name", "cpu")
 
+data = qml.data.load("qchem", molname="HeH+", basis="STO-3G", bondlength=1.5)[0]
+H_obj = data.tapered_hamiltonian
+H_obj_coeffs, H_obj_ops = H_obj.terms()
 
-def f1(p, t):
-    # polyval(p, t) evaluates a polynomial of degree N=len(p)
-    # i.e. p[0]*t**(N-1) + p[1]*t**(N-2) + ... + p[N-2]*t + p[N-1]
-    return jnp.polyval(p, t)
+# casting the Hamiltonian coefficients to a jax Array
+H_obj = qml.Hamiltonian(jnp.array(H_obj_coeffs), H_obj_ops)
+E_exact = data.fci_energy
+n_wires = len(H_obj.wires)
 
-
-def f2(p, t):
-    return p[0] * jnp.sin(p[1] * t)
-
-
-Ht = f1 * qml.PauliX(0) + f2 * qml.PauliY(1)
-
-p1 = jnp.ones(5)
-p2 = jnp.array([1.0, jnp.pi])
-t = 0.5
-print(Ht((p1, p2), t))
-
-coeffs = [1.0] * 2
-coeffs += [lambda p, t: jnp.sin(p[0] * t) + jnp.sin(p[1] * t) for _ in range(3)]
-ops = [qml.PauliX(i) @ qml.PauliX(i + 1) for i in range(2)]
-ops += [qml.PauliZ(i) for i in range(3)]
-
-Ht = qml.dot(coeffs, ops)
-
-# random coefficients
-key = jax.random.PRNGKey(777)
-subkeys = jax.random.split(key, 3)  # create list of 3 subkeys
-params = [jax.random.uniform(subkeys[i], shape=[2], maxval=5) for i in range(3)]
-print(Ht(params, 0.5))
-
-ts = jnp.linspace(0.0, 5.0, 100)
-fs = Ht.coeffs_parametrized
-ops = Ht.ops_parametrized
-n_channels = len(fs)
-fig, axs = plt.subplots(nrows=n_channels, figsize=(5, 2 * n_channels), gridspec_kw={"hspace": 0})
-for n in range(n_channels):
-    ax = axs[n]
-    ax.plot(ts, fs[n](params[n], ts))
-    ax.set_ylabel(f"$f_{n}$")
-axs[0].set_title(f"Envelopes $f_i(p_i, t)$ of $\sum_i X_i X_{{i+1}} + \sum_i f_i(p_i, t) Z_i$")
-axs[-1].set_xlabel("time t")
-plt.tight_layout()
-plt.show()
-
-dev = qml.device("default.qubit", range(4))
-
-ts = jnp.array([0.0, 3.0])
-H_obj = sum([qml.PauliZ(i) for i in range(4)])
+def a(wires):
+    return 0.5 * qml.PauliX(wires) + 0.5j * qml.PauliY(wires)
 
 
-@jax.jit
-@qml.qnode(dev, interface="jax")
-def qnode(params):
-    qml.evolve(Ht)(params, ts)
-    return qml.expval(H_obj)
+def ad(wires):
+    return 0.5 * qml.PauliX(wires) - 0.5j * qml.PauliY(wires)
 
 
-print(qnode(params))
+omega = 2 * jnp.pi * jnp.array([4.8080, 4.8333])
+g = 2 * jnp.pi * jnp.array([0.01831, 0.02131])
 
-print(jax.grad(qnode)(params))
+H_D = qml.dot(omega, [ad(i) @ a(i) for i in range(n_wires)])
+H_D += qml.dot(
+    g,
+    [ad(i) @ a((i + 1) % n_wires) + ad((i + 1) % n_wires) @ a(i) for i in range(n_wires)],
+)
+
+def normalize(x):
+    """Differentiable normalization to +/- 1 outputs (shifted sigmoid)"""
+    return (1 - jnp.exp(-x)) / (1 + jnp.exp(-x))
+
+# Because ParametrizedHamiltonian expects each callable function to have the signature
+# f(p, t) but we have additional parameters it depends on, we create a wrapper function
+# that constructs the callables with the appropriate parameters imprinted on them
+def drive_field(T, omega, sign=1.0):
+    def wrapped(p, t):
+        # The first len(p)-1 values of the trainable params p characterize the pwc function
+        amp = qml.pulse.pwc(T)(p[:-1], t)
+        # The amplitude is normalized to maximally reach +/-20MHz (0.02GHz)
+        amp = 0.02 * normalize(amp)
+
+        # The last value of the trainable params p provides the drive frequency deviation
+        # We normalize as the difference to drive can maximally be +/-1 GHz
+        # d_angle = normalize(p[-1])
+        # phase = jnp.exp(sign * 1j * (omega + d_angle) * t)
+        phase = jnp.exp(sign * 1j * omega * t)
+        return amp * phase
+
+    return wrapped
+
+duration = 15.0
+
+fs = [drive_field(duration, omega[i], 1.0) for i in range(n_wires)]
+fs += [drive_field(duration, omega[i], -1.0) for i in range(n_wires)]
+ops = [a(i) for i in range(n_wires)]
+ops += [ad(i) for i in range(n_wires)]
+
+H_C = qml.dot(fs, ops)
+
